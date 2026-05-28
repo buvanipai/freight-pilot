@@ -10,6 +10,12 @@ import psycopg2.extras
 import psycopg2.pool
 import redis
 from dotenv import load_dotenv
+
+
+def _redis_client(url: str, **kwargs):
+    if os.environ.get("REDIS_CLUSTER", "false").lower() == "true":
+        return redis.RedisCluster.from_url(url, **kwargs)
+    return redis.from_url(url, **kwargs)
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -19,8 +25,6 @@ from starlette.requests import Request
 
 from api.agent import propose_reroute
 from api.models import AnomalyDetector, ETAPredictor
-from producer.main import main as producer_main
-from consumer.main import main as consumer_main
 
 load_dotenv()
 
@@ -31,6 +35,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 # Module-level state (populated by lifespan)
 _state: dict = {}
+_retrain_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -42,7 +47,7 @@ async def lifespan(app: FastAPI):
         dsn=DATABASE_URL,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
-    r = redis.from_url(REDIS_URL, decode_responses=True)
+    r = _redis_client(REDIS_URL, decode_responses=True)
 
     anomaly_detector = AnomalyDetector.load()
     eta_predictor = ETAPredictor.load()
@@ -61,14 +66,9 @@ async def lifespan(app: FastAPI):
                 eta_predictor.update_predictions(conn)
         print("[api] Model fitting complete")
 
-    for name, target in (
-        ("model_fitting", _fit_models),
-        ("producer", producer_main),
-        ("consumer", consumer_main),
-    ):
-        t = threading.Thread(target=target, name=name, daemon=True)
-        t.start()
-        print(f"[api] Started {name} thread")
+    t = threading.Thread(target=_fit_models, name="model_fitting", daemon=True)
+    t.start()
+    print("[api] Started model_fitting thread")
 
     print("[api] Startup complete")
     yield
@@ -364,19 +364,28 @@ def resolve_shipment(shipment_id: str):
 # ---------------------------------------------------------------------------
 
 def _retrain():
-    detector = _state["anomaly_detector"]
-    predictor = _state["eta_predictor"]
-    with get_conn() as conn:
-        detector.fit_and_score_all(conn)
-        predictor.fit(conn)
-        predictor.update_predictions(conn)
-    _state["anomaly_detector"] = detector
-    _state["eta_predictor"] = predictor
-    print("[api] ML retrain complete")
+    try:
+        detector = _state["anomaly_detector"]
+        predictor = _state["eta_predictor"]
+        with get_conn() as conn:
+            detector.fit_and_score_all(conn)
+            predictor.fit(conn)
+            predictor.update_predictions(conn)
+        _state["anomaly_detector"] = detector
+        _state["eta_predictor"] = predictor
+        print("[api] ML retrain complete")
+    finally:
+        _retrain_lock.release()
 
 
 @app.post("/ml/retrain")
 @limiter.limit("5/minute")
 def ml_retrain(request: Request, background_tasks: BackgroundTasks):
-    background_tasks.add_task(_retrain)
+    if not _retrain_lock.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="retrain already in progress")
+    try:
+        background_tasks.add_task(_retrain)
+    except Exception:
+        _retrain_lock.release()
+        raise
     return {"status": "retrain started"}

@@ -26,5 +26,47 @@ services:
       timeout: 3s
       retries: 5
 
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://freightpilot:freightpilot@postgres:5432/freightpilot
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8080:8080"
+
+  producer:
+    build: .
+    command: sh -c "python db/schema_apply.py && python -m producer.main"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://freightpilot:freightpilot@postgres:5432/freightpilot
+      REDIS_URL: redis://redis:6379
+      REDIS_CLUSTER: "false"
+    restart: on-failure
+
+  consumer:
+    build: .
+    command: sh -c "python db/schema_apply.py && python -m consumer.main"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://freightpilot:freightpilot@postgres:5432/freightpilot
+      REDIS_URL: redis://redis:6379
+      REDIS_CLUSTER: "false"
+    restart: on-failure
+
 volumes:
   pgdata:

@@ -1,0 +1,75 @@
+# .github/workflows/deploy-api.yml
+# Builds the API image, pushes to ECR, and restarts the container on EC2.
+# Triggered on every push to main that touches backend code.
+#
+# Required GitHub Secrets:
+#   AWS_ACCESS_KEY_ID       — IAM user with ECR push access
+#   AWS_SECRET_ACCESS_KEY
+#   EC2_HOST                — public IP or DNS of the EC2 instance
+#   EC2_SSH_KEY             — private key matching the freight-pilot-ec2-key pair
+#   DATABASE_URL            — RDS connection string
+#   REDIS_URL               — ElastiCache connection string
+#   ANTHROPIC_API_KEY
+#   CORS_ORIGINS            — comma-separated allowed origins
+
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+      - "progress.md"
+      - ".github/workflows/deploy.yml"
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REGISTRY: 526247032705.dkr.ecr.us-east-2.amazonaws.com
+  ECR_REPOSITORY: freight-pilot
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        run: |
+          IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          docker build -t $IMAGE:${{ github.sha }} .
+          docker tag  $IMAGE:${{ github.sha }} $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+              | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+            docker pull $IMAGE
+            docker rm -f freight-pilot-api || true
+            docker run -d --name freight-pilot-api --restart unless-stopped -p 80:8080 \
+              -e DATABASE_URL='${{ secrets.DATABASE_URL }}' \
+              -e REDIS_URL='${{ secrets.REDIS_URL }}' \
+              -e ANTHROPIC_API_KEY='${{ secrets.ANTHROPIC_API_KEY }}' \
+              -e CORS_ORIGINS='${{ secrets.CORS_ORIGINS }}' \
+              -e REDIS_CLUSTER=true \
+              -e PORT=8080 \
+              $IMAGE

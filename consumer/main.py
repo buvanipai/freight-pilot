@@ -8,12 +8,24 @@ import psycopg2
 import redis
 from dotenv import load_dotenv
 
+
+def _redis_client(url: str, **kwargs):
+    """Use RedisCluster when REDIS_CLUSTER=true (ElastiCache), plain Redis otherwise (local)."""
+    if os.environ.get("REDIS_CLUSTER", "false").lower() == "true":
+        return redis.RedisCluster.from_url(url, **kwargs)
+    return redis.from_url(url, **kwargs)
+
 load_dotenv()
 
 STREAM_NAME = "freight-events"
 GROUP_NAME = "freightpilot-consumers"
 CONSUMER_NAME = "consumer-1"
-METRICS_INTERVAL = 30  # seconds
+DLQ_STREAM = "freight:dlq"
+RETRY_HASH = "freight:retry-counts"
+MAX_RETRIES = 3
+CLAIM_IDLE_MS = 60_000   # reclaim PEL messages idle > 60 s
+RECLAIM_INTERVAL = 30    # seconds between XAUTOCLAIM sweeps
+METRICS_INTERVAL = 30    # seconds between metric flushes
 
 REQUIRED_FIELDS = {"shipment_id", "event_type", "mode", "timestamp"}
 
@@ -25,7 +37,7 @@ STATUS_MAP = {
     "delivered": "delivered",
     "delay_reported": "delayed",
     "carrier_silent": "in_transit",
-    "location_update": None,  # no status change
+    "location_update": None,
 }
 
 
@@ -41,11 +53,13 @@ def create_consumer_group(r):
 
 
 def process_message(conn, message_id, data):
-    # Validate required fields
+    """
+    Returns (ok, reason, permanent).
+    permanent=True means validation failure — retry will not help.
+    """
     if not REQUIRED_FIELDS.issubset(data.keys()):
         missing = REQUIRED_FIELDS - data.keys()
-        print(f"[consumer] Skipping {message_id} — missing fields: {missing}")
-        return False
+        return False, f"missing fields: {missing}", True
 
     shipment_id = data["shipment_id"]
     event_type = data["event_type"]
@@ -57,35 +71,106 @@ def process_message(conn, message_id, data):
     try:
         timestamp = datetime.fromisoformat(timestamp_str)
     except ValueError:
-        print(f"[consumer] Skipping {message_id} — invalid timestamp: {timestamp_str}")
-        return False
+        return False, f"invalid timestamp: {timestamp_str!r}", True
 
     new_status = STATUS_MAP.get(event_type)
     try:
         with conn.cursor() as cur:
-            # Insert event
             cur.execute(
                 """INSERT INTO events (shipment_id, event_type, mode, location, note, timestamp, stream_id)
                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (shipment_id, event_type, mode, location, note, timestamp, message_id)
+                (shipment_id, event_type, mode, location, note, timestamp, message_id),
             )
-            # Update shipment last_update
             cur.execute(
                 "UPDATE shipments SET last_update = NOW() WHERE id = %s",
-                (shipment_id,)
+                (shipment_id,),
             )
-            # Update status if applicable
             if new_status is not None:
                 cur.execute(
                     "UPDATE shipments SET status = %s WHERE id = %s",
-                    (new_status, shipment_id)
+                    (new_status, shipment_id),
                 )
         conn.commit()
     except Exception as e:
         conn.rollback()
-        print(f"[consumer] Transaction rolled back for {message_id}: {e}")
-        return False
-    return True
+        return False, f"db error: {e}", False
+
+    return True, "", False
+
+
+def send_to_dlq(r, message_id, data, reason, attempts):
+    r.xadd(DLQ_STREAM, {
+        **data,
+        "_original_id": message_id,
+        "_reason": reason,
+        "_attempts": str(attempts),
+        "_failed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    print(f"[consumer] DLQ ← {message_id} after {attempts} attempt(s): {reason}")
+
+
+def handle_result(r, message_id, data, ok, reason, permanent):
+    if ok:
+        r.xack(STREAM_NAME, GROUP_NAME, message_id)
+        r.hdel(RETRY_HASH, message_id)
+        return
+
+    # Permanent failures (bad schema, unparseable data) go straight to DLQ.
+    if permanent:
+        send_to_dlq(r, message_id, data, reason, 1)
+        r.xack(STREAM_NAME, GROUP_NAME, message_id)
+        r.hdel(RETRY_HASH, message_id)
+        return
+
+    # Transient failures (DB error) — increment retry counter.
+    attempts = r.hincrby(RETRY_HASH, message_id, 1)
+    if attempts >= MAX_RETRIES:
+        send_to_dlq(r, message_id, data, reason, attempts)
+        r.xack(STREAM_NAME, GROUP_NAME, message_id)
+        r.hdel(RETRY_HASH, message_id)
+    else:
+        # Leave in PEL — XAUTOCLAIM will reclaim it after CLAIM_IDLE_MS.
+        print(f"[consumer] ✗ {message_id} attempt {attempts}/{MAX_RETRIES}: {reason}")
+
+
+def reclaim_pending(r, conn):
+    """
+    Pull back PEL messages idle > CLAIM_IDLE_MS and reprocess them.
+    Returns (extra_events_processed, extra_latencies).
+    Requires Redis >= 6.2 for XAUTOCLAIM; silently skips on older versions.
+    """
+    extra_processed = 0
+    extra_latencies = []
+
+    try:
+        result = r.xautoclaim(
+            STREAM_NAME, GROUP_NAME, CONSUMER_NAME,
+            min_idle_time=CLAIM_IDLE_MS,
+            start_id="0-0",
+            count=100,
+        )
+        entries = result[1] if result and len(result) >= 2 else []
+    except redis.exceptions.ResponseError as e:
+        print(f"[consumer] XAUTOCLAIM unavailable: {e}")
+        return extra_processed, extra_latencies
+
+    for message_id, data in entries:
+        t_start = time.time()
+        ok, reason, permanent = process_message(conn, message_id, data)
+        elapsed_ms = (time.time() - t_start) * 1000
+        handle_result(r, message_id, data, ok, reason, permanent)
+        if ok:
+            extra_processed += 1
+            extra_latencies.append(elapsed_ms)
+            print(
+                f"[consumer] ✓ (reclaimed) {data.get('event_type')} "
+                f"for {data.get('shipment_id')} ({elapsed_ms:.1f}ms)"
+            )
+
+    if entries:
+        print(f"[consumer] Reclaimed {len(entries)} pending message(s)")
+
+    return extra_processed, extra_latencies
 
 
 def insert_metrics(conn, r, events_processed, latencies):
@@ -114,7 +199,7 @@ def insert_metrics(conn, r, events_processed, latencies):
         )
         row = cur.fetchone()
         exceptions_detected = row[0]
-        anomalies_detected  = row[1]
+        anomalies_detected = row[1]
 
         cur.execute(
             """INSERT INTO pipeline_metrics
@@ -122,7 +207,7 @@ def insert_metrics(conn, r, events_processed, latencies):
                 exceptions_detected, anomalies_detected, processing_latency_ms)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (now, events_processed, events_per_second, consumer_lag,
-             exceptions_detected, anomalies_detected, avg_latency)
+             exceptions_detected, anomalies_detected, avg_latency),
         )
     conn.commit()
     print(
@@ -134,7 +219,7 @@ def insert_metrics(conn, r, events_processed, latencies):
 
 
 def main():
-    r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    r = _redis_client(os.environ["REDIS_URL"], decode_responses=True)
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
 
     print("[consumer] Connected to Redis and PostgreSQL")
@@ -143,6 +228,12 @@ def main():
     events_processed = 0
     latencies = []
     last_metrics_time = time.time()
+    last_reclaim_time = time.time()
+
+    # Recover any messages left pending from a previous crash before reading new ones.
+    extra, extra_lat = reclaim_pending(r, conn)
+    events_processed += extra
+    latencies.extend(extra_lat)
 
     try:
         while True:
@@ -150,30 +241,37 @@ def main():
                 GROUP_NAME, CONSUMER_NAME,
                 {STREAM_NAME: ">"},
                 count=10,
-                block=5000
+                block=5000,
             )
 
             if messages:
                 for stream, entries in messages:
                     for message_id, data in entries:
                         t_start = time.time()
-                        ok = process_message(conn, message_id, data)
+                        ok, reason, permanent = process_message(conn, message_id, data)
                         elapsed_ms = (time.time() - t_start) * 1000
-
+                        handle_result(r, message_id, data, ok, reason, permanent)
                         if ok:
                             events_processed += 1
                             latencies.append(elapsed_ms)
-                            print(f"[consumer] ✓ {data.get('event_type')} for {data.get('shipment_id')} ({elapsed_ms:.1f}ms)")
+                            print(
+                                f"[consumer] ✓ {data.get('event_type')} "
+                                f"for {data.get('shipment_id')} ({elapsed_ms:.1f}ms)"
+                            )
 
-                        # Acknowledge regardless (skip bad messages)
-                        r.xack(STREAM_NAME, GROUP_NAME, message_id)
+            now = time.time()
 
-            # Emit metrics every 30s
-            if time.time() - last_metrics_time >= METRICS_INTERVAL:
+            if now - last_reclaim_time >= RECLAIM_INTERVAL:
+                extra, extra_lat = reclaim_pending(r, conn)
+                events_processed += extra
+                latencies.extend(extra_lat)
+                last_reclaim_time = now
+
+            if now - last_metrics_time >= METRICS_INTERVAL:
                 insert_metrics(conn, r, events_processed, latencies)
                 events_processed = 0
                 latencies = []
-                last_metrics_time = time.time()
+                last_metrics_time = now
 
     except KeyboardInterrupt:
         print("[consumer] Shutting down gracefully")

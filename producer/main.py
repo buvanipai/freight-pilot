@@ -9,6 +9,12 @@ import psycopg2
 import redis
 from dotenv import load_dotenv
 
+
+def _redis_client(url: str, **kwargs):
+    if os.environ.get("REDIS_CLUSTER", "false").lower() == "true":
+        return redis.RedisCluster.from_url(url, **kwargs)
+    return redis.from_url(url, **kwargs)
+
 load_dotenv()
 
 STREAM_NAME = "freight-events"
@@ -62,7 +68,7 @@ def inject_exception(conn, shipment):
 
 
 def main():
-    r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    r = _redis_client(os.environ["REDIS_URL"], decode_responses=True)
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
 
     print(f"[producer] Connected to Redis and PostgreSQL")
