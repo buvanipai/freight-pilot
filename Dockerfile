@@ -19,7 +19,7 @@ COPY api/      api/
 COPY consumer/ consumer/
 COPY producer/ producer/
 COPY db/       db/
-COPY models/   models/
+RUN mkdir -p models/
 
 # Pre-compiled .pyc files land under /app so PYTHONPATH is clean
 ENV PYTHONPATH=/app
