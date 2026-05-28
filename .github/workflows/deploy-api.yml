@@ -73,3 +73,19 @@ jobs:
               -e REDIS_CLUSTER=true \
               -e PORT=8080 \
               $IMAGE
+
+            docker rm -f freight-pilot-producer || true
+            docker run -d --name freight-pilot-producer --restart unless-stopped \
+              -e DATABASE_URL='${{ secrets.DATABASE_URL }}' \
+              -e REDIS_URL='${{ secrets.REDIS_URL }}' \
+              -e REDIS_CLUSTER=true \
+              $IMAGE \
+              sh -c "python db/schema_apply.py && python -m producer.main"
+
+            docker rm -f freight-pilot-consumer || true
+            docker run -d --name freight-pilot-consumer --restart unless-stopped \
+              -e DATABASE_URL='${{ secrets.DATABASE_URL }}' \
+              -e REDIS_URL='${{ secrets.REDIS_URL }}' \
+              -e REDIS_CLUSTER=true \
+              $IMAGE \
+              sh -c "python db/schema_apply.py && python -m consumer.main"

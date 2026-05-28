@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 
 def _redis_client(url: str, **kwargs):
     if os.environ.get("REDIS_CLUSTER", "false").lower() == "true":
-        return redis.RedisCluster.from_url(url, **kwargs)
+        return redis.RedisCluster.from_url(
+            url, ssl_cert_reqs=None, skip_full_coverage_check=True, **kwargs
+        )
     return redis.from_url(url, **kwargs)
 
 load_dotenv()

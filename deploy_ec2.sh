@@ -61,15 +61,34 @@ systemctl enable docker
 systemctl start docker
 aws ecr get-login-password --region "\$AWS_REGION" | docker login --username AWS --password-stdin "\${ACCOUNT_ID}.dkr.ecr.\${AWS_REGION}.amazonaws.com"
 docker pull "\$IMAGE_URI"
+DB_URL='postgresql://freightpilot:rijqum-samwy3-mipqUd@freightpilot-db.cvqc6a80m97n.us-east-2.rds.amazonaws.com:5432/freightpilot?sslmode=require'
+REDIS_URL='rediss://clustercfg.freightpilot.j48pai.use2.cache.amazonaws.com:6379'
+
 docker rm -f freight-pilot-api || true
 docker run -d --name freight-pilot-api --restart unless-stopped -p 80:8080 \
-  -e DATABASE_URL='postgresql://freightpilot:wybTon-nakpeg-3gujfy@freightpilot-db.cvqc6a80m97n.us-east-2.rds.amazonaws.com:5432/freightpilot' \
-  -e REDIS_URL='redis://clustercfg.freightpilot.j48pai.use2.cache.amazonaws.com:6379' \
+  -e DATABASE_URL="\$DB_URL" \
+  -e REDIS_URL="\$REDIS_URL" \
   -e REDIS_CLUSTER='true' \
   -e ANTHROPIC_API_KEY='${ANTHROPIC_KEY}' \
   -e CORS_ORIGINS='https://buvanipai.github.io,https://buvanipai.github.io/freight-pilot' \
   -e PORT='8080' \
   "\$IMAGE_URI"
+
+docker rm -f freight-pilot-producer || true
+docker run -d --name freight-pilot-producer --restart unless-stopped \
+  -e DATABASE_URL="\$DB_URL" \
+  -e REDIS_URL="\$REDIS_URL" \
+  -e REDIS_CLUSTER='true' \
+  "\$IMAGE_URI" \
+  sh -c "python db/schema_apply.py && python -m producer.main"
+
+docker rm -f freight-pilot-consumer || true
+docker run -d --name freight-pilot-consumer --restart unless-stopped \
+  -e DATABASE_URL="\$DB_URL" \
+  -e REDIS_URL="\$REDIS_URL" \
+  -e REDIS_CLUSTER='true' \
+  "\$IMAGE_URI" \
+  sh -c "python db/schema_apply.py && python -m consumer.main"
 EOF
 
 INSTANCE_ID=$(aws ec2 run-instances --region "$AWS_REGION" \
