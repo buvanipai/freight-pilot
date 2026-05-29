@@ -179,13 +179,8 @@ class ETAPredictor:
 
         df = pd.DataFrame([dict(r) for r in rows])
 
-        def to_utc(ts):
-            if ts.tzinfo is None:
-                return ts.replace(tzinfo=timezone.utc)
-            return ts
-
-        df['created_at'] = df['created_at'].apply(to_utc)
-        df['last_update'] = df['last_update'].apply(to_utc)
+        df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
+        df['last_update'] = pd.to_datetime(df['last_update'], utc=True)
         df['actual_hours'] = (df['last_update'] - df['created_at']).dt.total_seconds() / 3600
         df['hour_of_day'] = df['created_at'].dt.hour
         df['day_of_week'] = df['created_at'].dt.dayofweek
@@ -205,7 +200,7 @@ class ETAPredictor:
                 outcome_rows = cur.fetchall()
             if outcome_rows:
                 odf = pd.DataFrame([dict(r) for r in outcome_rows])
-                odf['created_at'] = odf['created_at'].apply(to_utc)
+                odf['created_at'] = pd.to_datetime(odf['created_at'], utc=True)
                 odf['hour_of_day'] = odf['created_at'].dt.hour
                 odf['day_of_week'] = odf['created_at'].dt.dayofweek
                 odf = odf.rename(columns={'actual_eta_hours': 'actual_hours'})
