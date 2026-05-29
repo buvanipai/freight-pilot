@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import joblib
 import numpy as np
 import pandas as pd
+from mapie.regression import CrossConformalRegressor
 from sklearn.ensemble import IsolationForest, RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
@@ -113,7 +114,7 @@ class AnomalyDetector:
 
 class ETAPredictor:
     def __init__(self):
-        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.mapie_model = None
         self.mode_encoder = LabelEncoder()
         self.origin_encoder = LabelEncoder()
         self.dest_encoder = LabelEncoder()
@@ -131,11 +132,11 @@ class ETAPredictor:
             known = set(encoder.classes_)
             return encoder.transform([v if v in known else encoder.classes_[0] for v in col.fillna('unknown')])
 
-        mode_enc = safe_encode(self.mode_encoder, df['mode'])
+        mode_enc   = safe_encode(self.mode_encoder, df['mode'])
         origin_enc = safe_encode(self.origin_encoder, df['origin_state'])
-        dest_enc = safe_encode(self.dest_encoder, df['destination_state'])
+        dest_enc   = safe_encode(self.dest_encoder, df['destination_state'])
 
-        features = np.column_stack([
+        return np.column_stack([
             mode_enc,
             origin_enc,
             dest_enc,
@@ -144,7 +145,22 @@ class ETAPredictor:
             df['hour_of_day'].values,
             df['day_of_week'].values,
         ])
-        return features
+
+    def _prepare_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add hour_of_day and day_of_week derived from created_at."""
+        df = df.copy()
+
+        def to_utc(ts):
+            if pd.isnull(ts):
+                return datetime.now(timezone.utc)
+            if hasattr(ts, 'tzinfo') and ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
+            return ts
+
+        df['created_at'] = df['created_at'].apply(to_utc)
+        df['hour_of_day'] = df['created_at'].apply(lambda ts: ts.hour)
+        df['day_of_week'] = df['created_at'].apply(lambda ts: ts.weekday())
+        return df
 
     def fit(self, conn) -> None:
         with conn.cursor() as cur:
@@ -173,24 +189,56 @@ class ETAPredictor:
         df['actual_hours'] = (df['last_update'] - df['created_at']).dt.total_seconds() / 3600
         df['hour_of_day'] = df['created_at'].dt.hour
         df['day_of_week'] = df['created_at'].dt.dayofweek
-
         df = df[df['actual_hours'] > 0]
+
+        # Include resolved exception outcomes as extra calibration examples
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT s.mode, s.origin_state, s.destination_state,
+                              s.freight_value_usd, s.weight_tons, s.created_at,
+                              eo.actual_eta_hours
+                       FROM exception_outcomes eo
+                       JOIN shipments s ON s.id = eo.shipment_id
+                       WHERE eo.actual_eta_hours IS NOT NULL AND eo.actual_eta_hours > 0"""
+                )
+                outcome_rows = cur.fetchall()
+            if outcome_rows:
+                odf = pd.DataFrame([dict(r) for r in outcome_rows])
+                odf['created_at'] = odf['created_at'].apply(to_utc)
+                odf['hour_of_day'] = odf['created_at'].dt.hour
+                odf['day_of_week'] = odf['created_at'].dt.dayofweek
+                odf = odf.rename(columns={'actual_eta_hours': 'actual_hours'})
+                cols = ['mode', 'origin_state', 'destination_state',
+                        'freight_value_usd', 'weight_tons',
+                        'hour_of_day', 'day_of_week', 'actual_hours']
+                df = pd.concat([df[cols], odf[cols]], ignore_index=True)
+                print(f"[models] ETAPredictor: added {len(outcome_rows)} outcome records for calibration")
+        except Exception as exc:
+            print(f"[models] ETAPredictor: could not load outcomes — {exc}")
+
         if len(df) < 50:
-            print(f"[models] ETAPredictor: fewer than 50 valid delivered rows — skipping fit")
+            print(f"[models] ETAPredictor: fewer than 50 valid rows — skipping fit")
             return
 
         X = self._build_features(df, fit_encoders=True)
         y = df['actual_hours'].values
-        self.model.fit(X, y)
+
+        base = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.mapie_model = CrossConformalRegressor(
+            estimator=base, confidence_level=0.9, method='plus', cv=5
+        )
+        self.mapie_model.fit_conformalize(X, y)
         self.is_fitted = True
 
         _ensure_models_dir()
         joblib.dump(self, ETA_PATH)
-        print(f"[models] ETAPredictor fitted on {len(df)} delivered shipments, saved to {ETA_PATH}")
+        print(f"[models] ETAPredictor fitted on {len(df)} rows with MAPIE conformal intervals, saved to {ETA_PATH}")
 
-    def predict_one(self, shipment: dict) -> float:
+    def predict_one(self, shipment: dict) -> tuple:
+        """Returns (eta_predicted, eta_lower, eta_upper, eta_confidence)."""
         if not self.is_fitted:
-            return shipment.get('eta_hours', 0.0)
+            return (shipment.get('eta_hours', 0.0), None, None, None)
 
         created_at = shipment.get('created_at')
         if created_at is None:
@@ -208,7 +256,11 @@ class ETAPredictor:
             'day_of_week': created_at.weekday(),
         }])
         X = self._build_features(df, fit_encoders=False)
-        return float(self.model.predict(X)[0])
+        y_pred, y_pis = self.mapie_model.predict_interval(X)
+        point = float(y_pred[0])
+        lower = float(max(0.0, y_pis[0, 0, 0]))
+        upper = float(y_pis[0, 1, 0])
+        return (point, lower, upper, 0.9)
 
     def update_predictions(self, conn) -> None:
         if not self.is_fitted:
@@ -226,26 +278,33 @@ class ETAPredictor:
         if not rows:
             return
 
+        df = pd.DataFrame([dict(r) for r in rows])
+        df = self._prepare_df(df)
+        X = self._build_features(df, fit_encoders=False)
+        y_pred, y_pis = self.mapie_model.predict_interval(X)
+
         with conn.cursor() as cur:
-            for row in rows:
-                shipment = {
-                    'id': row['id'], 'mode': row['mode'],
-                    'origin_state': row['origin_state'], 'destination_state': row['destination_state'],
-                    'freight_value_usd': row['freight_value_usd'], 'weight_tons': row['weight_tons'],
-                    'created_at': row['created_at'],
-                }
-                pred = self.predict_one(shipment)
+            for i in range(len(df)):
+                point = float(y_pred[i])
+                lower = float(max(0.0, y_pis[i, 0, 0]))
+                upper = float(y_pis[i, 1, 0])
                 cur.execute(
-                    "UPDATE shipments SET predicted_eta_hours = %s WHERE id = %s",
-                    (pred, shipment['id'])
+                    """UPDATE shipments
+                       SET eta_predicted = %s, eta_lower = %s, eta_upper = %s, eta_confidence = %s
+                       WHERE id = %s""",
+                    (point, lower, upper, 0.9, df.iloc[i]['id'])
                 )
         conn.commit()
-        print(f"[models] ETAPredictor updated predictions for {len(rows)} shipments")
+        print(f"[models] ETAPredictor updated conformal predictions for {len(df)} shipments")
 
     @classmethod
     def load(cls) -> 'ETAPredictor':
         if os.path.exists(ETA_PATH):
             obj = joblib.load(ETA_PATH)
+            # Old pickled models lack mapie_model — force retrain
+            if not hasattr(obj, 'mapie_model') or obj.mapie_model is None:
+                obj.mapie_model = None
+                obj.is_fitted = False
             print(f"[models] ETAPredictor loaded from {ETA_PATH}")
             return obj
         return cls()

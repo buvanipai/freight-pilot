@@ -64,3 +64,22 @@ CREATE INDEX IF NOT EXISTS idx_shipments_carrier ON shipments(carrier_dot);
 CREATE INDEX IF NOT EXISTS idx_shipments_created ON shipments(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_shipment ON events(shipment_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+
+-- Conformal prediction columns
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS eta_predicted REAL;
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS eta_lower REAL;
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS eta_upper REAL;
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS eta_confidence REAL;
+
+-- Exception resolution outcomes for feedback loop
+CREATE TABLE IF NOT EXISTS exception_outcomes (
+    id BIGSERIAL PRIMARY KEY,
+    shipment_id TEXT REFERENCES shipments(id),
+    resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    actual_eta_hours REAL,
+    resolution_type TEXT NOT NULL DEFAULT 'other',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcomes_shipment ON exception_outcomes(shipment_id);
+CREATE INDEX IF NOT EXISTS idx_outcomes_created ON exception_outcomes(created_at);

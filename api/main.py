@@ -10,6 +10,8 @@ import psycopg2.extras
 import psycopg2.pool
 import redis
 from dotenv import load_dotenv
+from typing import Optional
+from pydantic import BaseModel
 
 
 def _redis_client(url: str, **kwargs):
@@ -188,7 +190,8 @@ def list_shipments(
                            mode, commodity, status, carrier_status,
                            freight_value_usd, weight_tons, eta_hours,
                            created_at, last_update, resolved, resolved_at,
-                           predicted_eta_hours, anomaly_score, is_anomaly
+                           predicted_eta_hours, anomaly_score, is_anomaly,
+                           eta_predicted, eta_lower, eta_upper, eta_confidence
                     FROM shipments {where}
                     ORDER BY {order}
                     LIMIT %s OFFSET %s""",
@@ -344,8 +347,13 @@ def list_customers():
 # Resolve
 # ---------------------------------------------------------------------------
 
+class ResolveRequest(BaseModel):
+    actual_eta_hours: Optional[float] = None
+    resolution_type: str = "other"
+
+
 @app.post("/resolve/{shipment_id}")
-def resolve_shipment(shipment_id: str):
+def resolve_shipment(shipment_id: str, body: Optional[ResolveRequest] = None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM shipments WHERE id = %s", (shipment_id,))
@@ -355,6 +363,13 @@ def resolve_shipment(shipment_id: str):
                 "UPDATE shipments SET resolved = TRUE, resolved_at = NOW() WHERE id = %s",
                 (shipment_id,),
             )
+            if body is not None:
+                cur.execute(
+                    """INSERT INTO exception_outcomes
+                           (shipment_id, resolved_at, actual_eta_hours, resolution_type)
+                       VALUES (%s, NOW(), %s, %s)""",
+                    (shipment_id, body.actual_eta_hours, body.resolution_type),
+                )
         conn.commit()
     return {"shipment_id": shipment_id, "resolved": True}
 
@@ -389,3 +404,54 @@ def ml_retrain(request: Request, background_tasks: BackgroundTasks):
         _retrain_lock.release()
         raise
     return {"status": "retrain started"}
+
+
+@app.get("/ml/outcomes")
+def ml_outcomes():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT
+                       COUNT(*)                                          AS total_outcomes,
+                       COUNT(eo.actual_eta_hours)                       AS outcomes_with_eta,
+                       COUNT(*) FILTER (
+                           WHERE eo.actual_eta_hours IS NOT NULL
+                             AND s.eta_lower IS NOT NULL
+                             AND eo.actual_eta_hours BETWEEN s.eta_lower AND s.eta_upper
+                       )                                                AS covered,
+                       AVG(s.eta_upper - s.eta_lower) FILTER (
+                           WHERE s.eta_lower IS NOT NULL AND s.eta_upper IS NOT NULL
+                       )                                                AS avg_interval_width
+                   FROM exception_outcomes eo
+                   JOIN shipments s ON s.id = eo.shipment_id"""
+            )
+            stats = cur.fetchone()
+
+            cur.execute(
+                """SELECT DATE_TRUNC('day', eo.created_at) AS day,
+                          ROUND(AVG(s.eta_upper - s.eta_lower)::numeric, 2) AS avg_width,
+                          COUNT(*) AS count
+                   FROM exception_outcomes eo
+                   JOIN shipments s ON s.id = eo.shipment_id
+                   WHERE s.eta_lower IS NOT NULL AND s.eta_upper IS NOT NULL
+                   GROUP BY 1
+                   ORDER BY 1 DESC
+                   LIMIT 14"""
+            )
+            width_trend = [dict(r) for r in cur.fetchall()]
+
+    total_outcomes   = int(stats['total_outcomes'])
+    outcomes_with_eta = int(stats['outcomes_with_eta'])
+    covered          = int(stats['covered']) if stats['covered'] else 0
+    coverage_rate    = covered / outcomes_with_eta if outcomes_with_eta > 0 else None
+    avg_width        = float(stats['avg_interval_width']) if stats['avg_interval_width'] else None
+
+    return {
+        "total_outcomes": total_outcomes,
+        "outcomes_with_eta": outcomes_with_eta,
+        "covered": covered,
+        "coverage_rate": coverage_rate,
+        "target_coverage": 0.9,
+        "avg_interval_width_hours": avg_width,
+        "interval_width_trend": width_trend,
+    }
