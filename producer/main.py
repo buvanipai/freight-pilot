@@ -74,6 +74,16 @@ def main():
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
 
     print(f"[producer] Connected to Redis and PostgreSQL")
+
+    # Refresh stale last_update so old seed data doesn't immediately flood the silent exception queue
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE shipments SET last_update = NOW() - (random() * INTERVAL '2 hours') "
+            "WHERE status != 'delivered' AND last_update < NOW() - INTERVAL '1 hour'"
+        )
+    conn.commit()
+    print(f"[producer] Refreshed stale last_update timestamps")
+
     shipments = load_shipment_ids(conn)
     print(f"[producer] Loaded {len(shipments)} active shipments")
 

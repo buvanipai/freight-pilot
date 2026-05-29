@@ -9,14 +9,20 @@ load_dotenv()
 
 database_url = os.environ["DATABASE_URL"]
 
+force = os.environ.get("FORCE_RESEED", "false").lower() == "true"
+
 conn = psycopg2.connect(database_url)
 try:
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM carriers")
         if cur.fetchone()[0] > 0:
-            print("[seed_restore] Data already present, skipping.")
-            conn.close()
-            exit(0)
+            if not force:
+                print("[seed_restore] Data already present, skipping.")
+                conn.close()
+                exit(0)
+            print("[seed_restore] FORCE_RESEED=true — truncating and reseeding")
+            cur.execute("TRUNCATE carriers, customers, shipments, events, pipeline_metrics CASCADE")
+    conn.commit()
 finally:
     conn.close()
 
