@@ -72,7 +72,6 @@ jobs:
               -e CORS_ORIGINS='${{ secrets.CORS_ORIGINS }}' \
               -e REDIS_CLUSTER=true \
               -e PORT=8080 \
-              -e FORCE_RESEED=true \
               $IMAGE
 
             docker rm -f freight-pilot-producer || true
