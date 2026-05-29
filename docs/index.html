@@ -225,6 +225,7 @@ function ExceptionCard({ exc, onResolved }) {
   const [showResolveForm, setShowResolveForm] = useState(false);
   const [resolutionType, setResolutionType] = useState('carrier_resolved');
   const [actualEta, setActualEta]           = useState('');
+  const [modalId, setModalId]               = useState(null);
 
   function submitResolve() {
     setResolving(true);
@@ -248,7 +249,8 @@ function ExceptionCard({ exc, onResolved }) {
            onClick={() => setExpanded(e => !e)}>
         <div className="flex items-center gap-3 min-w-0">
           <span className="text-indigo-500 text-base">{expanded ? '▾' : '▸'}</span>
-          <span className="font-mono font-semibold text-sm text-gray-800">{exc.id}</span>
+          <button onClick={e => { e.stopPropagation(); setModalId(exc.id); }}
+            className="font-mono font-semibold text-sm text-indigo-700 hover:underline focus:outline-none">{exc.id}</button>
           {exceptionBadge(exc.exception_type)}
           {exc.is_anomaly && exc.exception_type !== 'anomaly' && badge('Anomaly', 'purple')}
           <span className="text-xs text-gray-500 truncate hidden sm:block">{exc.origin_state} → {exc.destination_state}</span>
@@ -297,6 +299,7 @@ function ExceptionCard({ exc, onResolved }) {
           <RerouteOptions shipmentId={exc.id} />
         </div>
       )}
+      {modalId && <ShipmentModal shipmentId={modalId} onClose={() => setModalId(null)} />}
     </div>
   );
 }
