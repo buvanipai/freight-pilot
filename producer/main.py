@@ -35,9 +35,9 @@ NOTES_DELAY = ["Weather delay", "Traffic congestion", "Mechanical issue", "Drive
 
 def load_shipment_ids(conn):
     with conn.cursor() as cur:
-        cur.execute("SELECT id, mode, freight_value_usd, carrier_dot FROM shipments WHERE status != 'delivered'")
+        cur.execute("SELECT id, mode, freight_value_usd, carrier_dot, status FROM shipments WHERE status != 'delivered'")
         rows = cur.fetchall()
-    return [{"id": r[0], "mode": r[1], "freight_value_usd": r[2], "carrier_dot": r[3]} for r in rows]
+    return [{"id": r[0], "mode": r[1], "freight_value_usd": r[2], "carrier_dot": r[3], "status": r[4]} for r in rows]
 
 
 def load_carrier_name(conn, dot):
@@ -98,8 +98,18 @@ def main():
                     carrier_cache[shipment["carrier_dot"]] = load_carrier_name(conn, shipment["carrier_dot"])
                 carrier_name = carrier_cache[shipment["carrier_dot"]]
 
-                # 10% exception injection
-                if random.random() < 0.10:
+                # 10% exception injection; out_for_delivery shipments have 25% chance to deliver
+                if shipment["status"] == "out_for_delivery" and random.random() < 0.25:
+                    event_type = "delivered"
+                    note = random.choice(["Delivered successfully", "Package received", "Delivery confirmed", "Shipment complete"])
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE shipments SET status = 'delivered', last_update = NOW() WHERE id = %s",
+                            (shipment["id"],)
+                        )
+                    conn.commit()
+                    shipments = [s for s in shipments if s["id"] != shipment["id"]]
+                elif random.random() < 0.10:
                     event_type, note = inject_exception(conn, shipment)
                 else:
                     event_type = random.choice(EVENT_TYPES_NORMAL)

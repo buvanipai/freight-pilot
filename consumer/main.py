@@ -192,7 +192,7 @@ def insert_metrics(conn, r, events_processed, latencies):
             """SELECT
                COUNT(*) FILTER (
                  WHERE carrier_status = 'unresponsive'
-                    OR (eta_hours IS NOT NULL AND last_update < NOW() - INTERVAL '1 hour' * (eta_hours - 4) AND eta_hours > 4)
+                    OR status = 'delayed'
                     OR is_anomaly = TRUE
                ) AS exceptions_detected,
                COUNT(*) FILTER (WHERE is_anomaly = TRUE) AS anomalies_detected
