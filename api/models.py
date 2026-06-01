@@ -276,19 +276,22 @@ class ETAPredictor:
         df = pd.DataFrame([dict(r) for r in rows])
         df = self._prepare_df(df)
         X = self._build_features(df, fit_encoders=False)
-        y_pred, y_pis = self.mapie_model.predict_interval(X)
 
+        # Batch predict to avoid large (n_calibration × n_batch) internal MAPIE matrix
+        BATCH = 500
+        ids = df['id'].tolist()
         with conn.cursor() as cur:
-            for i in range(len(df)):
-                point = float(y_pred[i])
-                lower = float(max(0.0, y_pis[i, 0, 0]))
-                upper = float(y_pis[i, 1, 0])
-                cur.execute(
-                    """UPDATE shipments
-                       SET eta_predicted = %s, eta_lower = %s, eta_upper = %s, eta_confidence = %s
-                       WHERE id = %s""",
-                    (point, lower, upper, 0.9, df.iloc[i]['id'])
-                )
+            for start in range(0, len(df), BATCH):
+                X_batch = X[start:start + BATCH]
+                y_pred, y_pis = self.mapie_model.predict_interval(X_batch)
+                for j in range(len(X_batch)):
+                    cur.execute(
+                        """UPDATE shipments
+                           SET eta_predicted = %s, eta_lower = %s, eta_upper = %s, eta_confidence = %s
+                           WHERE id = %s""",
+                        (float(y_pred[j]), float(max(0.0, y_pis[j, 0, 0])),
+                         float(y_pis[j, 1, 0]), 0.9, ids[start + j])
+                    )
         conn.commit()
         print(f"[models] ETAPredictor updated conformal predictions for {len(df)} shipments")
 
