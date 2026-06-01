@@ -21,7 +21,7 @@ def _ensure_models_dir():
 
 class AnomalyDetector:
     def __init__(self):
-        self.model = IsolationForest(contamination=0.15, n_estimators=200, random_state=42)
+        self.model = IsolationForest(contamination=0.15, n_estimators=80, random_state=42)
         self.scaler = StandardScaler()
         self.mode_encoder = LabelEncoder()
         self.status_encoder = LabelEncoder()
@@ -219,9 +219,9 @@ class ETAPredictor:
         X = self._build_features(df, fit_encoders=True)
         y = df['actual_hours'].values
 
-        base = RandomForestRegressor(n_estimators=100, random_state=42)
+        base = RandomForestRegressor(n_estimators=40, max_depth=12, random_state=42)
         self.mapie_model = CrossConformalRegressor(
-            estimator=base, confidence_level=0.9, method='plus', cv=5
+            estimator=base, confidence_level=0.9, method='plus', cv=3
         )
         self.mapie_model.fit_conformalize(X, y)
         self.is_fitted = True
