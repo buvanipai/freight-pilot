@@ -125,7 +125,7 @@ function PipelineMetrics() {
 
 // ─── MLCalibration ───────────────────────────────────────────────────────────
 
-function MLCalibration() {
+function MLCalibration({ lastResolved }) {
   const [data, setData] = useState(null);
 
   const load = useCallback(() => {
@@ -133,7 +133,7 @@ function MLCalibration() {
       .then(r => r.json()).then(setData).catch(() => {});
   }, []);
 
-  useEffect(() => { load(); const t = setInterval(load, 60_000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { load(); const t = setInterval(load, 60_000); return () => clearInterval(t); }, [load, lastResolved]);
 
   if (!data || data.total_outcomes === 0) return null;
 
@@ -309,7 +309,7 @@ function ExceptionCard({ exc, onResolved }) {
 const EXC_PAGE_SIZE = 25;
 const EXC_TYPES = ['', 'delayed', 'unresponsive', 'silent', 'anomaly'];
 
-function ExceptionsPanel() {
+function ExceptionsPanel({ onResolvedGlobal }) {
   const [exceptions, setExceptions] = useState([]);
   const [loading, setLoading]       = useState(true);
   const [page, setPage]             = useState(0);
@@ -327,6 +327,7 @@ function ExceptionsPanel() {
 
   function onResolved(id) {
     setExceptions(ex => ex.filter(e => e.id !== id));
+    onResolvedGlobal?.();
   }
 
   function onFilterChange(setter) {
@@ -669,6 +670,7 @@ function App() {
   const [activeTab, setActiveTab]     = useState('Exceptions');
   const [serverReady, setServerReady] = useState(false);
   const [wakeSeconds, setWakeSeconds] = useState(0);
+  const [lastResolved, setLastResolved] = useState(0);
 
   // Tick elapsed seconds until the server responds
   useEffect(() => {
@@ -695,7 +697,7 @@ function App() {
       <Header health={health} />
       <main className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6">
         <PipelineMetrics />
-        <MLCalibration />
+        <MLCalibration lastResolved={lastResolved} />
 
         {/* Tab bar */}
         <div className="flex gap-1 mb-5 border-b border-gray-200">
@@ -711,7 +713,7 @@ function App() {
           ))}
         </div>
 
-        {activeTab === 'Exceptions'    && <ExceptionsPanel />}
+        {activeTab === 'Exceptions'    && <ExceptionsPanel onResolvedGlobal={() => setLastResolved(n => n + 1)} />}
         {activeTab === 'All Shipments' && <ShipmentsTable />}
       </main>
     </div>
