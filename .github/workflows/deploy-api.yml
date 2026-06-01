@@ -59,6 +59,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 15m
           script: |
             IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
             aws ecr get-login-password --region ${{ env.AWS_REGION }} \

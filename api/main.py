@@ -61,19 +61,6 @@ async def lifespan(app: FastAPI):
     _state["anomaly_detector"] = anomaly_detector
     _state["eta_predictor"] = eta_predictor
 
-    def _fit_models():
-        with _pool_conn(pool) as conn:
-            if not anomaly_detector.is_fitted:
-                anomaly_detector.fit_and_score_all(conn)
-            if not eta_predictor.is_fitted:
-                eta_predictor.fit(conn)
-                eta_predictor.update_predictions(conn)
-        print("[api] Model fitting complete")
-
-    t = threading.Thread(target=_fit_models, name="model_fitting", daemon=True)
-    t.start()
-    print("[api] Started model_fitting thread")
-
     print("[api] Startup complete")
     yield
 
