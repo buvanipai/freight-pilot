@@ -1,0 +1,20 @@
+name: ppo_shaped_v2
+
+reward:
+  type: shaped_v2
+  overrun_weight:              0.5    # penalty per hour of ETA overrun
+  cost_weight:                 0.001  # 10x stronger vs v1 — reroute_fast now costs -1.2/step
+  uncertainty_weight:          0.1    # penalty per hour of MAPIE interval width
+  unnecessary_reroute_penalty: 2.0    # extra penalty for rerouting when shipment is on track
+                                      # scaled by tier_factor (low-priority = harsher)
+  on_time_bonus:               5.0
+  late_penalty:                3.0
+
+train:
+  n_envs:           4
+  n_steps:          512
+  batch_size:       64
+  n_epochs:         10
+  gamma:            0.99
+  learning_rate:    0.0003
+  total_timesteps:  200000

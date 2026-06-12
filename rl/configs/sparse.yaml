@@ -1,0 +1,15 @@
+name: ppo_sparse
+
+reward:
+  type: sparse
+  on_time_bonus: 10.0   # awarded at episode end when eta_overrun < 1h
+  late_penalty:  5.0    # subtracted at episode end when overdue
+
+train:
+  n_envs:           4
+  n_steps:          512
+  batch_size:       64
+  n_epochs:         10
+  gamma:            0.99
+  learning_rate:    0.0003
+  total_timesteps:  200000

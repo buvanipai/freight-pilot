@@ -362,6 +362,31 @@ def resolve_shipment(shipment_id: str, body: Optional[ResolveRequest] = None):
 
 
 # ---------------------------------------------------------------------------
+# RL Recommendation
+# ---------------------------------------------------------------------------
+
+@app.get("/rl/recommend/{shipment_id}")
+@limiter.limit("30/minute")
+def rl_recommend(shipment_id: str, request: Request):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT s.*, c.tier
+                   FROM shipments s
+                   LEFT JOIN customers c ON c.id = s.customer_id
+                   WHERE s.id = %s""",
+                (shipment_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Shipment not found")
+
+    from api.rl_agent import recommend
+    result = recommend(dict(row))
+    return {"shipment_id": shipment_id, **result}
+
+
+# ---------------------------------------------------------------------------
 # ML retrain
 # ---------------------------------------------------------------------------
 

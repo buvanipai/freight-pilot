@@ -7,3 +7,4 @@ data/raw/
 *.db
 .DS_Store
 models/
+rl/checkpoints/
