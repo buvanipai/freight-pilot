@@ -42,15 +42,21 @@ _state: dict = {}
 _retrain_lock = threading.Lock()
 
 
+def _db_url_with_timeout(url: str, timeout: int = 5) -> str:
+    if "connect_timeout" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}connect_timeout={timeout}"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=2,
         maxconn=20,
-        dsn=DATABASE_URL,
+        dsn=_db_url_with_timeout(DATABASE_URL),
         cursor_factory=psycopg2.extras.RealDictCursor,
-        connect_timeout=5,
     )
     r = _redis_client(REDIS_URL, decode_responses=True)
 
