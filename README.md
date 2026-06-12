@@ -3,9 +3,7 @@
 > Near real-time freight event streaming pipeline with ML anomaly detection, ETA prediction, and LLM-powered rerouting.
 
 **Live Dashboard → [buvanipai.github.io/freight-pilot](https://buvanipai.github.io/freight-pilot/)**  
-**API → [freightpilot-api-t75n.onrender.com](https://freightpilot-api-t75n.onrender.com/docs)**
-
-> The API runs on Render's free tier and spins down after 15 minutes of inactivity. First load may take 30–60 seconds to cold-start.
+**API → [d2yu3oa51qymd0.cloudfront.net](https://d2yu3oa51qymd0.cloudfront.net/docs)**
 
 ---
 
@@ -21,7 +19,9 @@
 | **Exception Detection** | SQL rules | Delayed, silent (no update > 2h), unresponsive carrier, anomaly |
 | **Rerouting Agent** | Claude (LangChain) | Proposes 3 reroute options with carrier, mode, risk level, cost delta, and reasoning |
 | **API** | FastAPI | Rate-limited REST API with connection pooling |
+| **RL Agent** | Stable-Baselines3 PPO | Reroute action recommender trained on Gymnasium env; served via `/rl/recommend/{id}` |
 | **Frontend** | React 18 + Tailwind | Single-page dashboard on GitHub Pages |
+| **Infra** | AWS EC2 + ECR + CloudFront | Docker image pushed to ECR, pulled by EC2; CloudFront in front for HTTPS + caching |
 
 ---
 
@@ -39,18 +39,21 @@ Producer (daemon thread)                   │
        ▼                                   │
  Redis Stream ──► Consumer (daemon) ──────►│
                                            │
-                                     FastAPI (uvicorn)
+                                     FastAPI (uvicorn · EC2 us-east-2)
                                       ├── /health
                                       ├── /shipments
                                       ├── /exceptions
                                       ├── /pipeline/metrics
-                                      ├── /reroute/{id}   ◄── Claude Agent
+                                      ├── /reroute/{id}        ◄── Claude Agent
+                                      ├── /rl/recommend/{id}   ◄── PPO Agent
                                       └── /resolve/{id}
+                                           │
+                                    CloudFront (HTTPS)
                                            │
                                     GitHub Pages (React)
 ```
 
-Producer, consumer, and ML model fitting all run as daemon threads inside the single FastAPI process (required for Render's free tier single-service constraint).
+Producer, consumer, and ML model fitting all run as daemon threads inside the single FastAPI process. The API is containerised via Docker, pushed to ECR, and deployed on EC2 (us-east-2) with CloudFront in front for HTTPS termination and caching. CI/CD via GitHub Actions on every push to `main`.
 
 ---
 
@@ -71,13 +74,20 @@ Producer, consumer, and ML model fitting all run as daemon threads inside the si
 │   ├── seed_dump.sql     # 3.4MB SQL dump (replaces 765MB raw files)
 │   ├── seed_restore.py   # Restores seed_dump.sql via psql subprocess
 │   └── schema_apply.py  # Applies schema idempotently on startup
+├── env/
+│   ├── freight_env.py    # Gymnasium environment (state, actions, reward)
+│   └── data_generator.py # Synthetic shipment generator (no DB needed)
+├── rl/
+│   ├── train.py          # PPO training via Stable-Baselines3
+│   ├── configs/          # sparse / shaped_v1 / shaped_v2 reward configs
+│   └── experiments/      # comparison runner + README (reward hacking docs)
 ├── docs/
 │   ├── index.html        # React dashboard (GitHub Pages)
-│   └── config.js         # API base URL (localhost vs Render)
+│   └── config.js         # API base URL (localhost vs CloudFront)
 ├── data/raw/             # gitignored — FMCSA + FAF5 source files
 ├── models/               # gitignored — fitted .joblib model files
+├── rl/checkpoints/       # gitignored — trained PPO .zip files
 ├── docker-compose.yml    # Local PostgreSQL + Redis
-├── render.yaml           # Render Blueprint (all services)
 └── requirements.txt
 ```
 
@@ -117,7 +127,7 @@ Open `docs/index.html` directly in a browser or serve it with any static file se
 
 ## Key Design Decisions
 
-- **Single Render service** — Render's free tier doesn't support worker services. Producer, consumer, and model fitting run as daemon threads inside the web process, started via FastAPI's lifespan context manager.
+- **Single-process deployment** — Producer, consumer, and model fitting run as daemon threads inside the FastAPI process, started via the lifespan context manager. Keeps the Docker image simple and avoids orchestrating multiple containers on EC2.
 - **Seed dump over raw data** — The FMCSA and FAF5 source files are 470MB + 295MB. A `pg_dump` of the seeded database is 3.4MB and committed to the repo, making cold deploys fast.
 - **Deferred model fitting** — IsolationForest and RandomForest are fitted in a background thread at startup so uvicorn binds its port immediately (avoids Render's port scan timeout).
 - **GitHub Pages for frontend** — The React app is a single HTML file in `docs/` served natively by GitHub Pages. No build step, no Node.js required.
@@ -134,10 +144,11 @@ Open `docs/index.html` directly in a browser or serve it with any static file se
 | GET | `/exceptions` | Active exceptions (delayed, silent, unresponsive, anomaly) |
 | GET | `/pipeline/metrics` | Throughput, latency, exception counts |
 | GET | `/pipeline/stream-info` | Redis stream length + consumer lag |
+| GET | `/rl/recommend/{id}` | PPO agent action recommendation (hold / reroute_cheap / reroute_fast) |
 | POST | `/reroute/{id}` | Claude agent proposes 3 reroute options |
 | POST | `/resolve/{id}` | Mark exception as resolved |
 
-Interactive docs: `https://freightpilot-api-t75n.onrender.com/docs`
+Interactive docs: `https://d2yu3oa51qymd0.cloudfront.net/docs`
 
 ---
 
