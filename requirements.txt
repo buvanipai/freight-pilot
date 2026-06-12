@@ -15,3 +15,8 @@ slowapi
 httpx
 joblib
 pytest
+# RL module
+gymnasium
+stable-baselines3
+matplotlib
+pyyaml

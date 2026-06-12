@@ -19,7 +19,9 @@ COPY api/      api/
 COPY consumer/ consumer/
 COPY producer/ producer/
 COPY db/       db/
-RUN mkdir -p models/
+COPY env/      env/
+COPY rl/       rl/
+RUN mkdir -p models/ rl/checkpoints/
 
 # Pre-compiled .pyc files land under /app so PYTHONPATH is clean
 ENV PYTHONPATH=/app

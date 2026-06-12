@@ -167,6 +167,80 @@ function MLCalibration({ lastResolved }) {
   );
 }
 
+// ─── RLRecommendation ────────────────────────────────────────────────────────
+
+const ACTION_COLORS = { hold: 'gray', reroute_cheap: 'blue', reroute_fast: 'orange' };
+const ACTION_ICONS  = { hold: '⏸', reroute_cheap: '↩', reroute_fast: '⚡' };
+
+function RLRecommendation({ shipmentId }) {
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/rl/recommend/${shipmentId}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [shipmentId]);
+
+  if (loading) return (
+    <div className="text-xs text-gray-400 mt-3 flex items-center gap-1.5">
+      <span className="spinner"></span> RL Agent thinking…
+    </div>
+  );
+
+  if (!data || data.status === 'model_not_trained') return (
+    <div className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+      RL Agent: model not trained yet — run{' '}
+      <code className="font-mono bg-amber-100 px-1 rounded">python -m rl.train rl/configs/shaped_v2.yaml</code>
+    </div>
+  );
+
+  if (data.status !== 'ok') return null;
+
+  const p       = data.probabilities;
+  const confPct = Math.round(data.confidence * 100);
+  const obs     = data.obs_features || {};
+
+  return (
+    <div className="mt-3 bg-indigo-50 border border-indigo-100 rounded-xl p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-xs font-semibold uppercase text-indigo-500 tracking-wide">RL Agent</span>
+        <span className="text-gray-300">·</span>
+        <span className="text-xs text-gray-400">PPO · shaped_v2</span>
+      </div>
+
+      <div className="flex items-center gap-3 mb-2">
+        <span className="text-sm font-semibold text-gray-700">Recommend:</span>
+        {badge(`${ACTION_ICONS[data.action]} ${data.action}`, ACTION_COLORS[data.action] || 'gray')}
+        <span className="text-xs text-gray-500">{confPct}% confidence</span>
+      </div>
+
+      {/* Confidence bar */}
+      <div className="w-full bg-indigo-100 rounded-full h-1.5 mb-2">
+        <div className="bg-indigo-500 h-1.5 rounded-full transition-all" style={{width: confPct + '%'}}></div>
+      </div>
+
+      {/* Probability breakdown */}
+      <div className="flex gap-4 text-xs text-gray-500 mb-2">
+        <span>hold <span className="font-semibold text-gray-700">{Math.round(p.hold * 100)}%</span></span>
+        <span>reroute_cheap <span className="font-semibold text-gray-700">{Math.round(p.reroute_cheap * 100)}%</span></span>
+        <span>reroute_fast <span className="font-semibold text-gray-700">{Math.round(p.reroute_fast * 100)}%</span></span>
+      </div>
+
+      {/* Key features used */}
+      {Object.keys(obs).length > 0 && (
+        <div className="text-xs text-indigo-400 flex flex-wrap gap-x-3 border-t border-indigo-100 pt-1.5">
+          <span>overrun <span className="text-indigo-600 font-medium">{obs.eta_overrun_hours}h</span></span>
+          <span>MAPIE width <span className="text-indigo-600 font-medium">{obs.mapie_interval_width}h</span></span>
+          <span>silent <span className="text-indigo-600 font-medium">{obs.hours_since_last_update}h</span></span>
+          {obs.is_unresponsive === 1 && <span className="text-orange-500 font-medium">carrier unresponsive</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── RerouteOptions ──────────────────────────────────────────────────────────
 
 function RerouteOptions({ shipmentId }) {
@@ -296,6 +370,7 @@ function ExceptionCard({ exc, onResolved }) {
             <div><span className="text-gray-400">Last Update</span><br/><strong>{fmtDate(exc.last_update)}</strong></div>
             <div><span className="text-gray-400">Weight</span><br/><strong>{fmt(exc.weight_tons, 2)} tons</strong></div>
           </div>
+          <RLRecommendation shipmentId={exc.id} />
           <RerouteOptions shipmentId={exc.id} />
         </div>
       )}
