@@ -48,8 +48,9 @@ async def lifespan(app: FastAPI):
     pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=2,
         maxconn=20,
-        dsn=DATABASE_URL + "?connect_timeout=5",
+        dsn=DATABASE_URL,
         cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=5,
     )
     r = _redis_client(REDIS_URL, decode_responses=True)
 
